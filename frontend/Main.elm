@@ -1,16 +1,16 @@
 module Main exposing (..)
 
 import Html.App as App
-import Model exposing (model)
+import Model exposing (init)
 import Update exposing (update)
+import Subscriptions exposing (subscriptions)
 import View exposing (view)
 
 
 main =
-    App.beginnerProgram { model = model, view = view, update = update }
-
-
-
--- MODEL
--- UPDATE
--- VIEW
+    App.program
+        { init = init
+        , view = view
+        , update = update
+        , subscriptions = subscriptions
+        }

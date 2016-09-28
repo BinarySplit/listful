@@ -1,73 +1,178 @@
 module Update exposing (update)
 
-import Dict exposing (Dict, insert, empty, filter, keys)
-import List exposing (head, member)
+import Dict exposing (Dict)
+import List exposing (head, member, indexedMap)
 import Maybe exposing (Maybe)
-import Debug exposing (log)
-import Model exposing (Model, Node)
+import Dom
+import Model exposing (Model, NodeList, Node)
+import Task
 import Msg exposing (..)
+import ListTools
 
 
-update : Msg -> Model -> Model
+update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
-    case (log "msg" msg) of
-        SetContent i newContent ->
-            { model | nodes = Dict.update i (setContent newContent) model.nodes }
+    Debug.log "model"
+        (case (Debug.log "msg" msg) of
+            SetContent i newContent ->
+                setContent i newContent model ! []
 
-        Insert i ->
-            case (getParent model.nodes i) of
-                Just i ->
-                    Debug.crash (toString i)
+            SetFocus i ->
+                setFocus i model ! []
 
-                Nothing ->
-                    model
+            InsertNode i ->
+                insertNode i model ! [ focusOnId model.nextId ]
 
-        _ ->
+            MoveUp i ->
+                setFocusRelative i -1 model
+
+            MoveDown i ->
+                setFocusRelative i 1 model
+
+            Indent i ->
+                indent i model ! [ focusOnId i ]
+
+            _ ->
+                model ! []
+        )
+
+
+
+-- Action Handlers
+
+
+setContent : Int -> String -> Model -> Model
+setContent i newContent model =
+    { model
+        | nodes =
+            model.nodes
+                |> Dict.update i (Maybe.map (\n -> { n | content = newContent }))
+    }
+
+
+setFocus : Maybe Int -> Model -> Model
+setFocus i model =
+    { model | focusId = i }
+
+
+insertNode : Int -> Model -> Model
+insertNode i model =
+    let
+        ( parentId, idx ) =
+            Maybe.withDefault ( 0, 0 ) (getPosition i model)
+    in
+        model
+            |> addChildToModel parentId (idx + 1)
+            |> setFocus (Just model.nextId)
+
+
+focusOnId : Int -> Cmd Msg
+focusOnId id =
+    Dom.focus ("node-" ++ toString id)
+        |> Task.perform (\_ -> NoOp) (\_ -> NoOp)
+
+
+setFocusRelative : Int -> Int -> Model -> ( Model, Cmd Msg )
+setFocusRelative id m model =
+    case (getNodeAtRelativePosition id m model) of
+        Just fid ->
+            (setFocus (Just fid) model) ! [ focusOnId fid ]
+
+        Nothing ->
+            model ! []
+
+
+indent : Int -> Model -> Model
+indent id model =
+    case (getPosition id model) of
+        Just ( parentId, pos ) ->
+            if pos > 0 then
+                case (getNodeAtPosition parentId (pos - 1) model) of
+                    Just newParentId ->
+                        model
+                            |> moveNode id (Debug.log "parentId" parentId) (Debug.log "newParentId" newParentId)
+
+                    _ ->
+                        model
+            else
+                model
+
+        Nothing ->
             model
 
 
-addChild : Int -> Model -> Model
-addChild parentId model =
+
+-- Helper functions
+
+
+addChildToModel : Int -> Int -> Model -> Model
+addChildToModel parentId idx model =
     let
-        parent =
-            (Dict.get parentId model.nodes)
+        insertChild =
+            Maybe.map (\n -> { n | childrenIds = ListTools.insert idx model.nextId n.childrenIds })
     in
-        case parent of
-            Just p ->
-                { model
-                    | nodes =
-                        model.nodes
-                            |> Dict.update parentId
-                                (\p ->
-                                    case p of
-                                        Just p ->
-                                            Just { p | childrenIds = p.childrenIds :: model.nextId }
-
-                                        Nothing ->
-                                            Nothing
-                                )
-                            |> Dict.insert model.nextId { content = "", childrenIds = [] }
-                    , nextId = 1 + 1
-                }
-
-            Nothing ->
-                Debug.crash ("could not find id " ++ (toString parentId))
+        { model
+            | nodes =
+                model.nodes
+                    |> Dict.update parentId insertChild
+                    |> Dict.insert model.nextId { content = "", childrenIds = [] }
+            , nextId = model.nextId + 1
+        }
 
 
-getParent : Dict Int Node -> Int -> Maybe Int
-getParent nodes i =
+moveNode : Int -> Int -> Int -> Model -> Model
+moveNode id parentId newParentId model =
+    { model
+        | nodes =
+            model.nodes
+                |> Dict.update parentId
+                    (Maybe.map (\n -> { n | childrenIds = ListTools.removeElem id n.childrenIds }))
+                |> Dict.update newParentId
+                    (Maybe.map (\n -> { n | childrenIds = n.childrenIds ++ [ id ] }))
+    }
+
+
+getPosition : Int -> Model -> Maybe ( Int, Int )
+getPosition id model =
     let
-        parents =
-            filter (\k v -> member i v.childrenIds) nodes
+        parentAndPos =
+            model.nodes
+                |> Dict.filter (\k v -> member id v.childrenIds)
+                |> Dict.map (\k v -> ListTools.indexOf id v.childrenIds)
+                |> Dict.toList
+                |> head
     in
-        head (keys parents)
+        case parentAndPos of
+            Just ( parentId, Just pos ) ->
+                Just ( parentId, pos )
+
+            _ ->
+                Nothing
 
 
-setContent : String -> Maybe Node -> Maybe Node
-setContent newContent node =
-    case node of
+getNodeAtPosition : Int -> Int -> Model -> Maybe Int
+getNodeAtPosition parentId idx model =
+    model.nodes
+        |> Dict.get parentId
+        |> (flip Maybe.andThen) (\n -> ListTools.getAt n.childrenIds idx)
+
+
+linearizeNodes : NodeList -> Int -> List Int
+linearizeNodes nodes i =
+    case (Dict.get i nodes) of
+        Just n ->
+            [ i ] ++ List.concat (List.map (linearizeNodes nodes) n.childrenIds)
+
         Nothing ->
-            Just { content = newContent, childrenIds = [] }
+            []
 
-        Just node ->
-            Just { node | content = newContent }
+
+getNodeAtRelativePosition : Int -> Int -> Model -> Maybe Int
+getNodeAtRelativePosition id m model =
+    let
+        nodesInOrder =
+            linearizeNodes model.nodes 0
+    in
+        ListTools.indexOf id nodesInOrder
+            |> Maybe.map (\idx -> idx + m)
+            |> (flip Maybe.andThen) (\idx -> ListTools.getAt nodesInOrder idx)
